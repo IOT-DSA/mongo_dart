@@ -13,6 +13,7 @@ class Cursor {
   Map fields;
   int skip = 0;
   int limit = 0;
+  int batchSize = SelectorBuilder.defaultBatchSize;
   int _returnedCount = 0;
   Map sort;
   Map hint;
@@ -74,6 +75,7 @@ class Cursor {
       selector = selectorBuilderOrMap.map;
       fields = selectorBuilderOrMap.paramFields;
       limit = selectorBuilderOrMap.paramLimit;
+      batchSize = selectorBuilderOrMap.paramBatchSize;
       skip = selectorBuilderOrMap.paramSkip;
     } else if (selectorBuilderOrMap is Map) {
       selector = selectorBuilderOrMap;
@@ -89,12 +91,23 @@ class Cursor {
   }
 
   MongoQueryMessage generateQueryMessage() {
+    int itemsToFetch = 0;
+
+    if (limit == 0) {
+      itemsToFetch = batchSize;
+    } else if (batchSize < limit) {
+      itemsToFetch = batchSize;
+    } else {
+      itemsToFetch = limit;
+    }
+
     return new MongoQueryMessage(
-        collection.fullName(), flags, skip, limit, selector, fields);
+        collection.fullName(), flags, skip, itemsToFetch, selector, fields);
   }
 
-  MongoGetMoreMessage generateGetMoreMessage() {
-    return new MongoGetMoreMessage(collection.fullName(), cursorId);
+  MongoGetMoreMessage generateGetMoreMessage(
+      [int batchSize = SelectorBuilder.defaultBatchSize]) {
+    return new MongoGetMoreMessage(collection.fullName(), cursorId, batchSize);
   }
 
   Map _getNextItem() {
@@ -107,51 +120,49 @@ class Cursor {
     items.addAll(replyMessage.documents);
   }
 
-  Future<Map> nextObject() {
+  Future<Map> nextObject() async {
     if (state == State.INIT) {
       MongoQueryMessage qm = generateQueryMessage();
-      return db.queryMessage(qm).then((replyMessage) {
-        state = State.OPEN;
-        getCursorData(replyMessage);
-        if (items.length > 0) {
-          return new Future.value(_getNextItem());
-        } else {
-          return new Future.value(null);
-        }
-      });
+      var replyMessage = await db.queryMessage(qm);
+      state = State.OPEN;
+      getCursorData(replyMessage);
+      if (items.length > 0) {
+        return _getNextItem();
+      } else {
+        return null;
+      }
     } else if (state == State.OPEN && limit > 0 && _returnedCount == limit) {
       return this.close();
     } else if (state == State.OPEN && items.length > 0) {
-      return new Future.value(_getNextItem());
+      return _getNextItem();
     } else if (state == State.OPEN && cursorId > 0) {
-      var qm = generateGetMoreMessage();
-      return db.queryMessage(qm).then((replyMessage) {
-        state = State.OPEN;
-        getCursorData(replyMessage);
-        var isDead = (replyMessage.responseFlags ==
-                MongoReplyMessage.FLAGS_CURSOR_NOT_FOUND) &&
-            (cursorId == 0);
-        if (items.length > 0) {
-          return new Future.value(_getNextItem());
-        } else if (tailable && !isDead && awaitData) {
-          return new Future.value(null);
-        } else if (tailable && !isDead) {
-          var completer = new Completer<Map>();
-          new Timer(new Duration(milliseconds: tailableRetryInterval),
-              () => completer.complete(null));
-          return completer.future;
-        } else {
-          state = State.CLOSED;
-          return new Future.value(null);
-        }
-      });
+      var qm = generateGetMoreMessage(batchSize);
+      var replyMessage = await db.queryMessage(qm);
+      state = State.OPEN;
+      getCursorData(replyMessage);
+      var isDead = (replyMessage.responseFlags ==
+              MongoReplyMessage.FLAGS_CURSOR_NOT_FOUND) &&
+          (cursorId == 0);
+      if (items.length > 0) {
+        return _getNextItem();
+      } else if (tailable && !isDead && awaitData) {
+        return null;
+      } else if (tailable && !isDead) {
+        var completer = new Completer<Map>();
+        new Timer(new Duration(milliseconds: tailableRetryInterval),
+            () => completer.complete(null));
+        return completer.future;
+      } else {
+        state = State.CLOSED;
+        return null;
+      }
     } else {
       state = State.CLOSED;
-      return new Future.value(null);
+      return null;
     }
   }
 
-  Future close() {
+  Future close() async {
     ////_log.finer("Closing cursor, cursorId = $cursorId");
     state = State.CLOSED;
     if (cursorId != 0) {
@@ -159,7 +170,7 @@ class Cursor {
       cursorId = 0;
       db.executeMessage(msg, WriteConcern.UNACKNOWLEDGED);
     }
-    return new Future.value(null);
+    return null;
   }
 
 //  Stream<Map> get stream {

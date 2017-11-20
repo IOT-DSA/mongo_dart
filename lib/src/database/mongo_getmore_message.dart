@@ -6,7 +6,7 @@ class MongoGetMoreMessage extends MongoMessage {
   int numberToReturn;
 
   MongoGetMoreMessage(String collectionFullName, this.cursorId,
-      [this.numberToReturn = 20]) {
+      [this.numberToReturn = SelectorBuilder.defaultBatchSize]) {
     _collectionFullName = new BsonCString(collectionFullName);
     opcode = MongoMessage.GetMore;
   }
